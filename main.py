@@ -6,32 +6,31 @@ import kagglehub
 import os
 import glob
 
-# 페이지 설정
-st.set_page_config(page_title="METABRIC 유방암 데이터 분석기", layout="wide")
+# 페이지 설정 (반드시 가장 윗줄에 있어야 함)
+st.set_page_config(page_title="METABRIC 유방암 데이터 인사이트", layout="wide", page_icon="🧬")
 
-st.title("🧬 METABRIC Breast Cancer Data Analysis")
+st.title("🧬 METABRIC 유방암 데이터 인사이트")
+st.caption("세계 최대 규모의 유방암 임상 데이터를 기반으로 나의 상태를 비교 분석합니다.")
 
-# 1. 데이터 로드 함수
+# 1. 데이터 로드 함수 (st.toast 제거하여 오류 방지)
 @st.cache_data
 def load_data():
-    # 로컬 CSV 탐색 (Breast Cancer 파일 우선)
+    # 로컬 CSV 탐색
     csv_files = glob.glob("*.csv")
     
-    # 1순위: 파일명에 'METABRIC'이 포함된 것
+    # 1순위: 파일명에 'METABRIC' 포함
     target_csvs = [f for f in csv_files if "METABRIC" in f]
     
     if not target_csvs:
-        # 2순위: 202512가 없는 다른 csv
+        # 2순위: 202512가 없는 파일
         target_csvs = [f for f in csv_files if "202512" not in f]
     
     if target_csvs:
-        file_path = target_csvs[0]
-        st.toast(f"로컬 파일 발견: {file_path}")
-        return pd.read_csv(file_path, low_memory=False)
+        # 로컬 파일 읽기
+        return pd.read_csv(target_csvs[0], low_memory=False)
     
     # 3순위: Kaggle 다운로드
     try:
-        st.toast("데이터 다운로드 중...")
         path = kagglehub.dataset_download("gunesevitan/breast-cancer-metabric")
         files = glob.glob(os.path.join(path, "*.csv"))
         target = next((f for f in files if "METABRIC_RNA_Mutation" in f), files[0] if files else None)
@@ -47,6 +46,8 @@ st.sidebar.header("📂 데이터 설정")
 uploaded_file = st.sidebar.file_uploader("CSV 파일 업로드", type=['csv'])
 
 df = None
+
+# 파일 로드 로직
 if uploaded_file:
     try:
         df = pd.read_csv(uploaded_file)
@@ -56,25 +57,26 @@ if uploaded_file:
 else:
     df = load_data()
 
+# 데이터 로드 실패 시 중단
 if df is None:
-    st.warning("데이터가 없습니다.")
+    st.warning("데이터가 없습니다. CSV 파일을 업로드하거나 깃허브에 파일을 확인해주세요.")
     st.stop()
 
-# --- 컬럼 자동 매핑 (핵심 수정) ---
+# --- 컬럼 자동 매핑 ---
 
 cols = df.columns.tolist()
 
-# 우선순위가 높은 컬럼명을 먼저 찾도록 정의
+# 컬럼 찾기 함수
 def find_column(candidates, columns):
     for candidate in candidates:
         for col in columns:
-            if candidate.lower() == col.lower(): # 정확히 일치
+            if candidate.lower() == col.lower():
                 return col
-            if candidate.lower() in col.lower(): # 포함됨
+            if candidate.lower() in col.lower():
                 return col
-    return columns[0] # 못 찾으면 첫 번째 컬럼
+    return columns[0]
 
-# 실제 데이터셋의 컬럼명 반영
+# 기본값 찾기
 default_age_col = find_column(['Age at Diagnosis', 'age'], cols)
 default_size_col = find_column(['Tumor Size', 'size'], cols)
 default_id_col = find_column(['Patient ID', 'id'], cols)
@@ -84,24 +86,23 @@ col_age = st.sidebar.selectbox("나이(Age)", cols, index=cols.index(default_age
 col_size = st.sidebar.selectbox("종양크기(Size)", cols, index=cols.index(default_size_col))
 col_id = st.sidebar.selectbox("환자ID", cols, index=cols.index(default_id_col))
 
-# --- 데이터 전처리 (안전하게 처리) ---
+# --- 데이터 전처리 ---
 
-# 원본 데이터 보존을 위해 복사
+# 원본 보존
 analysis_df = df.copy()
 
-# 숫자 변환 (변환할 수 없는 값은 NaN으로 처리됨)
+# 숫자 변환
 analysis_df['Analyze_Age'] = pd.to_numeric(analysis_df[col_age], errors='coerce')
 analysis_df['Analyze_Size'] = pd.to_numeric(analysis_df[col_size], errors='coerce')
 
-# NaN 제거 (유효한 데이터만 남김)
+# 유효 데이터 필터링
 valid_data = analysis_df.dropna(subset=['Analyze_Age', 'Analyze_Size'])
 
-# 유효 데이터 개수 확인
 if len(valid_data) == 0:
     st.error("🚨 오류: 유효한 데이터가 0개입니다.")
     st.write(f"선택된 컬럼: {col_age}, {col_size}")
-    st.write("원본 데이터 샘플:")
-    st.dataframe(df[[col_age, col_size]].head())
+    st.write("데이터 샘플:")
+    st.dataframe(df.head())
     st.stop()
 else:
     analysis_df = valid_data
@@ -115,13 +116,15 @@ c2.metric("평균 나이", f"{analysis_df['Analyze_Age'].mean():.1f}세")
 c3.metric("평균 종양 크기", f"{analysis_df['Analyze_Size'].mean():.1f}mm")
 
 st.header("🔍 나의 위치 분석")
+
+# 입력 방식 선택 (여기서 오류가 발생했었음)
 input_type = st.radio("입력 방식", ["ID로 찾기", "직접 입력"], horizontal=True)
 
 my_age, my_size = 0.0, 0.0
 valid_input = False
 
 if input_type == "ID로 찾기":
-    # ID 검색 (문자열로 변환하여 비교)
+    # ID 검색
     analysis_df[col_id] = analysis_df[col_id].astype(str)
     patient_list = analysis_df[col_id].unique()
     
@@ -140,10 +143,11 @@ if input_type == "ID로 찾기":
 
 else: # 직접 입력
     c1, c2 = st.columns(2)
-    my_age = c1.number_input("나이 입력", value=50.0)
-    my_size = c2.number_input("종양 크기 입력", value=25.0)
+    my_age = c1.number_input("나이 입력 (세)", value=50.0, step=0.5)
+    my_size = c2.number_input("종양 크기 입력 (mm)", value=25.0, step=1.0)
     valid_input = True
 
+# 시각화 부분
 if valid_input:
     tab1, tab2 = st.tabs(["📊 나이 분포", "📉 종양 크기 분포"])
     
