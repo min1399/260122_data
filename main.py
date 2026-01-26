@@ -1,122 +1,171 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import kagglehub
 import os
 import glob
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
-# [필수] 페이지 설정은 무조건 맨 윗줄
-st.set_page_config(page_title="유방암 분석기 (안전모드)", layout="wide", page_icon="🧬")
+# --- 페이지 설정 ---
+st.set_page_config(
+    page_title="METABRIC 유방암 AI 분석기",
+    page_icon="🧬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.title("🧬 METABRIC 유방암 분석기")
-
-# --- 1. 안전 장치 (머신러닝 라이브러리 체크) ---
-try:
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.model_selection import train_test_split
-    ml_available = True
-except ImportError:
-    ml_available = False
-    st.warning("⚠️ 'scikit-learn'이 설치되지 않아 AI 예측 기능이 꺼졌습니다. (requirements.txt 확인 필요)")
-
-# --- 2. 데이터 로드 (Kaggle 제외, 업로드 파일 우선) ---
-@st.cache_data
-def load_data():
-    # 1. 사용자가 올린 파일 찾기
-    csv_files = glob.glob("*.csv")
-    
-    # METABRIC 파일 우선
-    target = next((f for f in csv_files if "METABRIC" in f), None)
-    
-    # 없으면 아무 csv나 사용 (단, 인구 데이터 제외)
-    if not target:
-        target = next((f for f in csv_files if "202512" not in f), None)
-        
-    if target:
-        return pd.read_csv(target, low_memory=False)
-    return None
-
-# --- 3. 사이드바 (입력창 강제 고정) ---
-with st.sidebar:
-    st.header("📂 데이터 & 입력")
-    
-    # 파일 업로더
-    uploaded_file = st.file_uploader("CSV 파일 업로드", type=['csv'])
-    if uploaded_file:
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = load_data()
-
-    if df is None:
-        st.error("데이터가 없습니다. CSV 파일을 업로드해주세요.")
-        st.stop()
-
-    # 컬럼 매핑
-    cols = df.columns.tolist()
-    def find(k, c):
-        for x in c:
-            if k in x.lower(): return x
-        return c[0]
-        
-    c_age = st.selectbox("나이 컬럼", cols, index=cols.index(find('age', cols)))
-    c_size = st.selectbox("크기 컬럼", cols, index=cols.index(find('size', cols)))
-    c_surv = st.selectbox("생존 컬럼", cols, index=cols.index(find('status', cols)))
-    
-    st.divider()
-    
-    # 입력창 (여기 있으면 무조건 보임)
-    st.subheader("📝 환자 정보 입력")
-    in_age = st.slider("나이 (Age)", 20, 100, 50)
-    in_size = st.slider("종양 크기 (Size)", 0, 200, 20)
-    
-    run_btn = st.button("분석 실행", type="primary")
-
-# --- 4. 메인 화면 로직 ---
-# 전처리
-df['Age'] = pd.to_numeric(df[c_age], errors='coerce')
-df['Size'] = pd.to_numeric(df[c_size], errors='coerce')
-df = df.dropna(subset=['Age', 'Size'])
-
-# 생존 여부 처리 (ML용)
-def parse_surv(x):
-    s = str(x).lower()
-    return 1 if 'liv' in s or '1' in s else 0
-df['Target'] = df[c_surv].apply(parse_surv)
+st.title("🧬 METABRIC Breast Cancer AI Analysis")
+st.caption("유방암 임상 데이터 시각화 및 머신러닝 생존 예측")
 
 # 탭 구성
-t1, t2 = st.tabs(["📊 시각화", "🤖 AI 예측"])
+tab1, tab2, tab3 = st.tabs(["📊 대시보드", "🤖 AI 생존 예측", "데이터 확인(Debug)"])
 
-with t1:
-    st.subheader("나의 위치 확인")
-    c1, c2 = st.columns(2)
+# --- 데이터 로드 함수 ---
+@st.cache_data
+def load_data():
+    csv_files = glob.glob("*.csv")
+    target_csvs = [f for f in csv_files if "METABRIC" in f]
+    if target_csvs:
+        return pd.read_csv(target_csvs[0], low_memory=False)
     
-    # 나이 분포
-    fig1 = px.histogram(df, x='Age', title="나이 분포")
-    fig1.add_vline(x=in_age, line_color="red", annotation_text="나")
-    c1.plotly_chart(fig1, use_container_width=True)
-    
-    # 크기 분포
-    fig2 = px.histogram(df, x='Size', title="종양 크기 분포")
-    fig2.add_vline(x=in_size, line_color="red", annotation_text="나")
-    c2.plotly_chart(fig2, use_container_width=True)
+    try:
+        path = kagglehub.dataset_download("gunesevitan/breast-cancer-metabric")
+        files = glob.glob(os.path.join(path, "*.csv"))
+        target = next((f for f in files if "METABRIC_RNA_Mutation" in f), files[0] if files else None)
+        if target:
+            return pd.read_csv(target, low_memory=False)
+    except:
+        pass
+    return None
 
-with t2:
-    if run_btn:
-        if ml_available:
-            if len(df) > 50:
-                # 머신러닝 수행
-                X = df[['Age', 'Size']]
-                y = df['Target']
-                
-                model = RandomForestClassifier(n_estimators=50, random_state=42)
-                model.fit(X, y)
-                prob = model.predict_proba([[in_age, in_size]])[0][1] * 100
-                
-                st.success(f"예측된 생존 확률: **{prob:.1f}%**")
-                if prob < 50: st.error("위험군에 속할 가능성이 있습니다.")
-                else: st.info("비교적 양호한 예후가 예상됩니다.")
-            else:
-                st.warning("데이터가 부족합니다.")
-        else:
-            st.error("라이브러리(scikit-learn) 문제로 AI 기능을 사용할 수 없습니다.")
+# 사이드바
+with st.sidebar:
+    st.header("📂 데이터 설정")
+    uploaded_file = st.file_uploader("CSV 파일 업로드", type=['csv'])
+    df = pd.read_csv(uploaded_file) if uploaded_file else load_data()
+
+if df is None:
+    st.error("데이터를 불러올 수 없습니다.")
+    st.stop()
+
+# --- 똑똑해진 컬럼 매핑 로직 ---
+cols = df.columns.tolist()
+
+def smart_find(keywords, columns):
+    # 1단계: 정확히 포함되는 단어 찾기
+    for k in keywords:
+        for c in columns:
+            if k.lower() in c.lower(): return c
+    return columns[0]
+
+# 생존 여부는 'Status'가 들어간 컬럼을 우선적으로 찾음
+default_age = smart_find(['age'], cols)
+default_size = smart_find(['size', 'tumor'], cols)
+default_surv = smart_find(['status', 'vital'], cols) # 'Status' 우선 검색
+default_id = smart_find(['id', 'patient'], cols)
+
+with st.sidebar:
+    st.divider()
+    st.subheader("🔧 컬럼 매핑 (확인필수)")
+    col_age = st.selectbox("나이 (Age)", cols, index=cols.index(default_age))
+    col_size = st.selectbox("크기 (Size)", cols, index=cols.index(default_size))
+    col_surv = st.selectbox("생존여부 (Status)", cols, index=cols.index(default_surv))
+    col_id = st.selectbox("ID", cols, index=cols.index(default_id))
+    
+    st.info("Tip: 생존여부는 'Survival Status' 또는 'Vital Status'를 선택하세요.")
+
+# --- 전처리 ---
+analysis_df = df.copy()
+analysis_df['Age_Clean'] = pd.to_numeric(analysis_df[col_age], errors='coerce')
+analysis_df['Size_Clean'] = pd.to_numeric(analysis_df[col_size], errors='coerce')
+
+# 생존 여부 타겟팅 (Living/Deceased 또는 0/1)
+# 문자열(Living 등)이면 1, 0으로 변환
+def parse_survival(val):
+    s = str(val).lower()
+    if 'liv' in s or s == '1': return 1 # Living, Alive
+    if 'die' in s or 'dec' in s or s == '0': return 0 # Died, Deceased
+    return None # 모를 경우
+
+analysis_df['Surv_Target'] = analysis_df[col_surv].apply(parse_survival)
+
+# 결측치 제거
+valid_df = analysis_df.dropna(subset=['Age_Clean', 'Size_Clean', 'Surv_Target'])
+
+# ==============================================================================
+# 탭 1: 대시보드
+# ==============================================================================
+with tab1:
+    st.header("🔍 데이터 시각화")
+    if len(valid_df) > 0:
+        c1, c2 = st.columns(2)
+        c1.metric("분석 데이터 수", f"{len(valid_df):,}명")
+        c2.metric("평균 생존율", f"{valid_df['Surv_Target'].mean()*100:.1f}%")
+        
+        fig = px.scatter(valid_df, x='Age_Clean', y='Size_Clean', color=valid_df['Surv_Target'].astype(str),
+                         title="나이 vs 종양크기 생존 분포", opacity=0.6,
+                         labels={'color': '생존여부(1=생존)'})
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("사이드바의 '분석 실행' 버튼을 눌러주세요.")
+        st.error("유효한 데이터가 0개입니다. 사이드바의 컬럼 매핑을 확인해주세요.")
+
+# ==============================================================================
+# 탭 2: AI 생존 예측
+# ==============================================================================
+with tab2:
+    st.header("🤖 AI 생존 예측")
+    
+    if len(valid_df) > 50:
+        # 모델 학습
+        X = valid_df[['Age_Clean', 'Size_Clean']]
+        y = valid_df['Surv_Target']
+        
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        model.fit(X_train, y_train)
+        
+        acc = accuracy_score(y_test, model.predict(X_test))
+        st.success(f"AI 모델 학습 완료! (정확도: {acc*100:.1f}%)")
+        
+        # 예측기
+        st.subheader("생존 확률 예측해보기")
+        c1, c2 = st.columns(2)
+        in_age = c1.slider("환자 나이", 20, 100, 50)
+        in_size = c2.slider("종양 크기 (mm)", 0, 200, 20)
+        
+        pred = model.predict_proba([[in_age, in_size]])
+        prob = pred[0][1] * 100 # 생존 확률
+        
+        st.metric(label="예상 생존 확률", value=f"{prob:.1f}%")
+        
+        if prob > 70:
+            st.success("비교적 긍정적인 예후가 예상됩니다.")
+        elif prob > 40:
+            st.warning("주의가 필요한 단계입니다.")
+        else:
+            st.error("높은 위험도가 예상됩니다.")
+            
+    else:
+        st.warning("데이터가 부족합니다. (탭3에서 데이터를 확인하세요)")
+
+# ==============================================================================
+# 탭 3: 디버깅 (문제 해결용)
+# ==============================================================================
+with tab3:
+    st.header("🛠 데이터가 왜 없지?")
+    st.write("현재 선택된 컬럼의 데이터 상태를 보여줍니다.")
+    
+    st.write(f"1. **나이 컬럼 ({col_age})** 샘플:")
+    st.write(df[col_age].head(3).values)
+    
+    st.write(f"2. **크기 컬럼 ({col_size})** 샘플:")
+    st.write(df[col_size].head(3).values)
+    
+    st.write(f"3. **생존 컬럼 ({col_surv})** 샘플:")
+    st.write(df[col_surv].head(3).values)
+    
+    st.write("---")
+    st.write("변환 후 데이터 (상위 5개):")
+    st.dataframe(valid_df.head())
